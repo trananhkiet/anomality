@@ -12,6 +12,6 @@ datasets=( '30s' '5s' '90s' )
 model_flags=($(for dataset in "${datasets[@]}"; do echo '-p '$loadpath'/'$modelfolder'/models/mvtec_'$dataset; done))
 dataset_flags=($(for dataset in "${datasets[@]}"; do echo '-d '$dataset; done))
 
-python src/load_and_evaluate_patchcore.py --gpu 3 --seed 0 $savefolder \
+python src/test.py --gpu 3 --seed 0 $savefolder \
 patch_core_loader "${model_flags[@]}" \
 dataset --resize 256 --imagesize 224 "${dataset_flags[@]}" mvtec $datapath
