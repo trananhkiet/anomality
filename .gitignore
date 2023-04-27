@@ -1,0 +1,7 @@
+results
+*.pyc
+TOMO_anomaly_detect_data
+models
+evaluated_results
+data_1class_for_testing
+dataset
