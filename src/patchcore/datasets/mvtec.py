@@ -35,6 +35,7 @@ class DatasetSplit(Enum):
     TRAIN = "train"
     VAL = "val"
     TEST = "test"
+    TEST_NO_MASK = "test_no_mask"
 
 
 class MVTecDataset(torch.utils.data.Dataset):
@@ -94,7 +95,6 @@ class MVTecDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         classname, anomaly, image_path, mask_path = self.data_to_iterate[idx]
-        print(image_path, "*"*20)
         # image = PIL.Image.open(image_path).convert("RGB")
 
         image = cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB)
@@ -158,6 +158,8 @@ class MVTecDataset(torch.utils.data.Dataset):
                     maskpaths_per_class[classname][anomaly] = [
                         os.path.join(anomaly_mask_path, x) for x in anomaly_mask_files
                     ]
+                elif(DatasetSplit.TEST_NO_MASK):
+                    maskpaths_per_class[classname][anomaly] = None
                 else:
                     maskpaths_per_class[classname]["good"] = None
 

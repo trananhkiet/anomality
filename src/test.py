@@ -6,7 +6,9 @@ import sys
 
 import click
 import numpy as np
+import cv2
 import torch
+import tqdm
 
 import patchcore.common
 
@@ -25,14 +27,14 @@ _DATASETS = {"mvtec": ["patchcore.datasets.mvtec", "MVTecDataset"]}
 @click.argument("results_path", type=str)
 @click.option("--gpu", type=int, default=[0], multiple=True, show_default=True)
 @click.option("--seed", type=int, default=0, show_default=True)
+@click.option("--threshold", type=float, default=0.0, show_default=True)
 @click.option("--save_segmentation_images" , default=True)
-#@click.option("--save_segmentation_images", is_flag=True)
 def main(**kwargs):
     pass
 
 
 @main.result_callback()
-def run(methods, results_path, gpu, seed, save_segmentation_images):
+def run(methods, results_path, gpu, seed, threshold, save_segmentation_images):
     methods = {key: item for (key, item) in methods}
     print("results_path: ",results_path, '*****************************************')
     print("save segmentation_images: ", save_segmentation_images)
@@ -84,137 +86,51 @@ def run(methods, results_path, gpu, seed, save_segmentation_images):
                         i + 1, len(PatchCore_list)
                     )
                 )
-                scores, segmentations, labels_gt, masks_gt = PatchCore.predict(
-                    dataloaders["testing"]
-                )
-                aggregator["scores"].append(scores)
-                aggregator["segmentations"].append(segmentations)
+                
+                # This 2 variable to calculate the accuracy
+                list_class_name_gt = []
+                list_class_name_predict = []
+                with tqdm.tqdm(dataloaders["testing"], desc="Inferring...", leave=False) as data_iterator:
+                    for image_dict in data_iterator:
+                        # labels_gt.extend(image["is_anomaly"].numpy().tolist())
+                        # masks_gt.extend(image["mask"].numpy().tolist())
+                        # image = image["image"]
+                        image = image_dict['image']
+                        class_name_gt = image_dict['is_anomaly']
+                        scores, masks = PatchCore.predict(image)
+                        score, mask = scores[0], masks[0]
+                        
+                        class_name = "bad" if score >= threshold else "good"
+                        list_class_name_predict.append(class_name)
 
-            scores = np.array(aggregator["scores"])
-            min_scores = scores.min(axis=-1).reshape(-1, 1)
-            max_scores = scores.max(axis=-1).reshape(-1, 1)
-            scores = (scores - min_scores) / (max_scores - min_scores)
-            scores = np.mean(scores, axis=0)
-
-            segmentations = np.array(aggregator["segmentations"])
-            min_scores = (
-                segmentations.reshape(len(segmentations), -1)
-                .min(axis=-1)
-                .reshape(-1, 1, 1, 1)
-            )
-            max_scores = (
-                segmentations.reshape(len(segmentations), -1)
-                .max(axis=-1)
-                .reshape(-1, 1, 1, 1)
-            )
-            segmentations = (segmentations - min_scores) / (max_scores - min_scores)
-            segmentations = np.mean(segmentations, axis=0)
-
-            anomaly_labels = [
-                x[1] != "good" for x in dataloaders["testing"].dataset.data_to_iterate
-            ]
-
-            # Plot Example Images.
-            if save_segmentation_images:
-                image_paths = [
-                    x[2] for x in dataloaders["testing"].dataset.data_to_iterate
-                ]
-                mask_paths = [
-                    x[3] for x in dataloaders["testing"].dataset.data_to_iterate
-                ]
-
-                def image_transform(image):
-                    dataloaders["testing"].dataset.transform_std = [0.229, 0.224, 0.225]
-                    dataloaders["testing"].dataset.transform_mean = [0.485, 0.456, 0.406]
-                    in_std = np.array(
-                        dataloaders["testing"].dataset.transform_std
-                    ).reshape(-1, 1, 1)
-                    in_mean = np.array(
-                        dataloaders["testing"].dataset.transform_mean
-                    ).reshape(-1, 1, 1)
-                    image = dataloaders["testing"].dataset.transform_img(image)
-                    return np.clip(
-                        (image.numpy()  * in_std + in_mean) * 255, 0, 255
-                    ).astype(np.uint8)              
-
-
-
-                # def image_transform(image):
-                #     in_std = np.array(
-                #         dataloaders["testing"].dataset.transform_std
-                #     ).reshape(-1, 1, 1)
-                #     in_mean = np.array(
-                #         dataloaders["testing"].dataset.transform_mean
-                #     ).reshape(-1, 1, 1)
-                #     image = dataloaders["testing"].dataset.transform_img(image)
-                #     return np.clip(
-                #         (image.numpy() * in_std + in_mean) * 255, 0, 255
-                #     ).astype(np.uint8)
-
-                def mask_transform(mask):
-                    return dataloaders["testing"].dataset.transform_mask(mask).numpy()
-
-                patchcore.utils.plot_segmentation_images(
-                    results_path,
-                    image_paths,
-                    segmentations,
-                    scores,
-                    mask_paths,
-                    image_transform=image_transform,
-                    mask_transform=mask_transform,
-                )
-
-            LOGGER.info("Computing evaluation metrics.")
-            # Compute Image-level AUROC scores for all images.
-            auroc = patchcore.metrics.compute_imagewise_retrieval_metrics(
-                scores, anomaly_labels
-            )["auroc"]
-            # print(segmentations.shape)
-            # print(masks_gt.shape)
-            # input("")
-            # Compute PRO score & PW Auroc for all images
-            pixel_scores = patchcore.metrics.compute_pixelwise_retrieval_metrics(
-                segmentations, masks_gt
-            )
-            full_pixel_auroc = pixel_scores["auroc"]
-
-            # Compute PRO score & PW Auroc only for images with anomalies
-            sel_idxs = []
-            for i in range(len(masks_gt)):
-                if np.sum(masks_gt[i]) > 0:
-                    sel_idxs.append(i)
-            pixel_scores = patchcore.metrics.compute_pixelwise_retrieval_metrics(
-                [segmentations[i] for i in sel_idxs], [masks_gt[i] for i in sel_idxs]
-            )
-            anomaly_pixel_auroc = pixel_scores["auroc"]
-
-            result_collect.append(
-                {
-                    "dataset_name": dataset_name,
-                    "instance_auroc": auroc,
-                    "full_pixel_auroc": full_pixel_auroc,
-                    "anomaly_pixel_auroc": anomaly_pixel_auroc,
-                }
-            )
-
-            for key, item in result_collect[-1].items():
-                if key != "dataset_name":
-                    LOGGER.info("{0}: {1:3.3f}".format(key, item))
-
+                        binary_mask = ((mask - mask.min()) / (mask.max() - mask.min())) * 255
+                        #cv2.imwrite("binary_mask.png", binary_mask)
+                        
+                        class_name_gt = "good" if int(class_name_gt.item()) == 0 else "bad"
+                        list_class_name_gt.append(class_name_gt)
+                        
+                        with open("results.txt", "a") as file:
+                            file.write(f"score: {score}, ground_truth: {class_name_gt} , predict: {class_name}\n")
+                
+                # Accuracy
+                num_of_correct_cases = sum([1 for x, y in zip(list_class_name_gt, list_class_name_predict) if x == y])
+                accuracy = (num_of_correct_cases/len(list_class_name_gt))*100
+                print(f"*=*=*=* The classification accuracy of model: {round(accuracy, 1)}%. *=*=*=*")
+                
             del PatchCore_list
             gc.collect()
 
         LOGGER.info("\n\n-----\n")
 
-    result_metric_names = list(result_collect[-1].keys())[1:]
-    result_dataset_names = [results["dataset_name"] for results in result_collect]
-    result_scores = [list(results.values())[1:] for results in result_collect]
-    patchcore.utils.compute_and_store_final_results(
-        results_path,
-        result_scores,
-        column_names=result_metric_names,
-        row_names=result_dataset_names,
-    )
+    # result_metric_names = list(result_collect[-1].keys())[1:]
+    # result_dataset_names = [results["dataset_name"] for results in result_collect]
+    # result_scores = [list(results.values())[1:] for results in result_collect]
+    # patchcore.utils.compute_and_store_final_results(
+    #     results_path,
+    #     result_scores,
+    #     column_names=result_metric_names,
+    #     row_names=result_dataset_names,
+    # )
 
 
 @main.command("patch_core_loader")
@@ -279,7 +195,7 @@ def dataset(
                 classname=subdataset,
                 resize=resize,
                 imagesize=imagesize,
-                split=dataset_library.DatasetSplit.TEST,
+                split=dataset_library.DatasetSplit.TEST_NO_MASK,
                 seed=seed,
             )
 
