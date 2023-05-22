@@ -22,17 +22,77 @@ LOGGER = logging.getLogger(__name__)
 
 _DATASETS = {"mvtec": ["patchcore.datasets.mvtec", "MVTecDataset"]}
 
+current_dir=os.getcwd()
+def create_draw_mask_folder(dir):
+    final_mask=os.path.join(dir,'draw_mask','final_mask')
+    if not os.path.exists(final_mask):
+        os.makedirs(final_mask, exist_ok=True)
+    return final_mask
+
+def save_draw_result(current_dir,b_img,score,class_name_gt,class_name,mask_index):
+    final_mask=create_draw_mask_folder(current_dir)
+    if(class_name=='good'):
+        img_text=show_text(b_img,score,class_name_gt,class_name)
+        cv2.imwrite(f'{final_mask}/mask_{class_name}_{mask_index}.jpg',img_text)
+    if(class_name=='bad'):
+        img_text=show_text(b_img,score,class_name_gt,class_name)
+        cv2.imwrite(f'{final_mask}/mask_bad_{mask_index}.jpg',img_text)
+def reshape_mask(t):
+    '''
+    input: [tuple],[int]
+    output:[tuple] or [int]
+    '''
+    return t if isinstance(t,tuple) else (t,t,3)
+def stack_mask(mask):
+    if len(mask.shape)!=2:
+        mask=np.squeeze(mask,axis=2)
+    return np.stack([mask,mask,mask],axis=2)
+def show_text(image,score,class_name_gt,class_name):
+    # font
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    # org
+    org = (0,30)
+    org_pred = (0,60)
+
+    # fontScale
+    fontScale = 6/10
+    # Blue color in BGR
+    color = (255, 0, 0)
+    # Line thickness of 2 px
+    thickness = 2
+    text=f"Scores:{score} GT:{class_name_gt} Pred:{class_name}"
+    img_text=cv2.putText(image,text, org, font, 
+                   fontScale, color, thickness, cv2.LINE_AA)
+    # img_text=cv2.putText(image, f'Pred:{class_name}', org_pred, font, 
+    #                fontScale, color, thickness, cv2.LINE_AA)
+    return img_text
+
+def resize_and_reshape(image,input_size):
+    ''''
+    Input
+    image:[np.array](h,w,c)
+    input_size: [tuple] (h,w)
+
+    Output
+    new_image: (h',w',c')
+    '''
+    image=cv2.resize(image,reshape_mask(input_size))
+    return image
+
+
+       
+
+
+
 
 @click.group(chain=True)
 @click.argument("results_path", type=str)
-@click.option("--gpu", type=int, default=[0], multiple=True, show_default=True)
+@click.option("--gpu", type=int, default=[0], multiple=True, show_default=True) #
 @click.option("--seed", type=int, default=0, show_default=True)
 @click.option("--threshold", type=float, default=0.0, show_default=True)
 @click.option("--save_segmentation_images" , default=True)
 def main(**kwargs):
     pass
-
-
 @main.result_callback()
 def run(methods, results_path, gpu, seed, threshold, save_segmentation_images):
     methods = {key: item for (key, item) in methods}
@@ -90,6 +150,9 @@ def run(methods, results_path, gpu, seed, threshold, save_segmentation_images):
                 # This 2 variable to calculate the accuracy
                 list_class_name_gt = []
                 list_class_name_predict = []
+                score_cluster=[]
+                mask_index=0
+                input_size=(384,384)
                 with tqdm.tqdm(dataloaders["testing"], desc="Inferring...", leave=False) as data_iterator:
                     for image_dict in data_iterator:
                         # labels_gt.extend(image["is_anomaly"].numpy().tolist())
@@ -99,19 +162,37 @@ def run(methods, results_path, gpu, seed, threshold, save_segmentation_images):
                         class_name_gt = image_dict['is_anomaly']
                         scores, masks = PatchCore.predict(image)
                         score, mask = scores[0], masks[0]
-                        
                         class_name = "bad" if score >= threshold else "good"
                         list_class_name_predict.append(class_name)
 
                         binary_mask = ((mask - mask.min()) / (mask.max() - mask.min())) * 255
-                        #cv2.imwrite("binary_mask.png", binary_mask)
-                        
+                        # _____________________________________segment defect area_____________________________________#
+                        img=cv2.imread(image_dict['image_path'][0])
+                        binary=binary_mask.astype(np.float).reshape(binary_mask.shape[0],binary_mask.shape[1])
+                       
+                        max_val=int(np.max(binary))
+                        min_val=int((np.max(binary)+5)/2)
+                        _,b_img=cv2.threshold(binary,min_val,max_val,cv2.THRESH_BINARY)
+                        # print(b_img.shape,binary.shape,img.shape)
+                        concat_img=resize_and_reshape(img,input_size)
+                        b_img=resize_and_reshape(b_img,input_size)
+                        binary=resize_and_reshape(binary_mask,input_size)
+                        # concat_img,b_img,binary=resize_and_reshape(image,b_img,binary,input_size)
+
+                        rbg_mask,rgb_binary=stack_mask(b_img),stack_mask(binary)
+                        # print(rbg_mask.shape,rgb_binary.shape,concat_img.shape)
+                        final_result=np.concatenate([rbg_mask,rgb_binary,concat_img],axis=1)
+                        #_________________________________________________________________________________________________#
                         class_name_gt = "good" if int(class_name_gt.item()) == 0 else "bad"
                         list_class_name_gt.append(class_name_gt)
-                        
+
                         with open("results.txt", "a") as file:
                             file.write(f"score: {score}, ground_truth: {class_name_gt} , predict: {class_name}\n")
-                
+                        #_______________________________________Save__________________________________________________________#
+                        save_draw_result(current_dir,final_result,score,class_name_gt,class_name,mask_index)
+                        mask_index+=1
+
+
                 # Accuracy
                 num_of_correct_cases = sum([1 for x, y in zip(list_class_name_gt, list_class_name_predict) if x == y])
                 accuracy = (num_of_correct_cases/len(list_class_name_gt))*100
